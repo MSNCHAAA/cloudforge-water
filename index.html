@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>CloudForge 雲匠控制系統</title>
+    
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <link rel="apple-touch-icon" href="https://via.placeholder.com/192/020617/38bdf8?text=MSNCH">
+
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/mqtt/4.3.7/mqtt.min.js"></script>
+    <style>
+        :root { --bg: #020617; --card: #1e293b; --blue: #38bdf8; --red: #ef4444; --green: #22c55e; --text: #f1f5f9; }
+        body { 
+            background: var(--bg); color: var(--text); font-family: -apple-system, sans-serif; 
+            margin: 0; padding: env(safe-area-inset-top) 15px 15px 15px;
+            display: flex; flex-direction: column; align-items: center;
+        }
+
+        /* 2號呼吸燈核心動畫 */
+        .led { width: 14px; height: 14px; border-radius: 50%; display: inline-block; vertical-align: middle; margin-right: 8px; }
+        .breathe { background: var(--blue); animation: b 2s infinite ease-in-out; box-shadow: 0 0 10px var(--blue); }
+        .steady { background: var(--blue); box-shadow: 0 0 15px var(--blue); opacity: 1; } /* 故障長亮 */
+        .off { background: #334155; }
+        @keyframes b { 0%,100% { opacity: 0.3; transform: scale(0.8); } 50% { opacity: 1; transform: scale(1.1); } }
+
+        /* 頂部控制區 */
+        .admin-zone { 
+            width: 100%; max-width: 500px; background: #0f172a; border: 2px solid var(--blue); 
+            padding: 20px; border-radius: 20px; margin: 15px 0; text-align: center; box-sizing: border-box;
+        }
+
+        /* 網格佈局 */
+        .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; width: 100%; max-width: 900px; }
+        .card { background: var(--card); border-radius: 18px; padding: 18px; border: 1px solid #334155; position: relative; transition: 0.3s; }
+        .card.offline { border: 1px dashed var(--red); opacity: 0.7; }
+        
+        /* 按鈕樣式 */
+        button { padding: 12px; border: none; border-radius: 10px; font-weight: bold; cursor: pointer; color: white; -webkit-tap-highlight-color: transparent; }
+        .unlock { background: var(--blue); color: #020617; width: 100%; font-size: 1rem; margin-top: 10px; }
+        .stop-all { background: var(--red); width: 100%; font-size: 1.1rem; border: 2px solid white; margin-top: 10px; display: none; animation: flash 1s infinite; }
+        @keyframes flash { 50% { opacity: 0.6; } }
+
+        .ctrl-btns { display: none; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 15px; }
+        .btn-on { background: var(--green); }
+        .btn-off { background: var(--red); }
+
+        /* 日誌視窗 */
+        #log { 
+            width: 100%; max-width: 900px; height: 120px; background: #000; color: #10b981; 
+            font-family: monospace; font-size: 11px; padding: 15px; margin-top: 20px; 
+            overflow-y: auto; border-radius: 15px; box-sizing: border-box;
+        }
+    </style>
+</head>
+<body>
+
+    <div style="text-align:center; margin-top:10px;">
+        <h2 style="color:var(--blue); margin:0;">CloudForge 雲匠</h2>
+        <small style="color:#64748b;">1+5 副板全景監控系統</small>
+    </div>
+
+    <div class="admin-zone">
+        <div id="status-txt">🔒 安全鎖定：監控模式</div>
+        <button class="unlock" id="unlockBtn" onclick="doUnlock()">人工授權解鎖</button>
+        <button class="stop-all" id="stopBtn" onclick="masterStop()">🚨 萬不得已：一鍵全停</button>
+    </div>
+
+    <div class="grid" id="ui-grid">
+        <div class="card" id="card-A1">
+            <h3 style="margin:0;"><span id="led-A1" class="led off"></span>主板 A1</h3>
+            <div id="m-data" style="font-size:13px; margin-top:10px; color:#94a3b8;">等待心跳訊號...</div>
+        </div>
+        </div>
+
+    <div id="log">>> 雲匠系統初始化成功...<br>>> 正在連線 MQTT 伺服器...</div>
+
+    <script>
+        // --- 核心帳密設定 (您記得住的這組) ---
+        const mqttCfg = {
+            url: 'wss://broker.hivemq.com:8884/mqtt',
+            user: 'MSNCHHOME',
+            pass: 'CloudForge2025'
+        };
+
+        let client = mqtt.connect(mqttCfg.url, { username: mqttCfg.user, password: mqttCfg.pass });
+        let isAuth = false;
+
+        // 生成 C1-C5 介面
+        const grid = document.getElementById('ui-grid');
+        for(let i=1; i<=5; i++) {
+            grid.innerHTML += `
+                <div class="card offline" id="card-C${i}">
+                    <h3 style="margin:0;"><span id="led-C${i}" class="led off"></span>副板 C${i}</h3>
+                    <div style="font-size:13px; margin:10px 0;">水位：<b id="val-C${i}">--</b> %</div>
+                    <div class="ctrl-btns" id="ctrl-C${i}">
+                        <button class="btn-on" onclick="send('C${i}','ON')">啟動</button>
+                        <button class="btn-off" onclick="send('C${i}','OFF')">停止</button>
+                    </div>
+                </div>
+            `;
+        }
+
+        function addLog(msg) {
+            const l = document.getElementById('log');
+            l.innerHTML = `[${new Date().toLocaleTimeString()}] ${msg}<br>` + l.innerHTML;
+            l.scrollTop = l.scrollHeight;
+        }
+
+        function doUnlock() {
+            if(prompt("請輸入管理密鑰：") === "CloudForge2025") {
+                isAuth = true;
+                document.querySelectorAll('.ctrl-btns').forEach(el => el.style.display = 'grid');
+                document.getElementById('unlockBtn').style.display = 'none';
+                document.getElementById('stopBtn').style.display = 'block';
+                document.getElementById('status-txt').innerText = "🔓 已取得最高操作權限";
+                addLog("警告：管理員已人工解鎖操作功能");
+            } else {
+                alert("密鑰錯誤！");
+            }
+        }
+
+        client.on('connect', () => {
+            addLog("MQTT 伺服器連線成功");
+            client.subscribe('cloudforge/#');
+            document.getElementById('led-A1').className = 'led breathe'; // A1 開始呼吸
+        });
+
+        // 模擬您的實測：連線中斷則 2 號燈長亮
+        client.on('close', () => {
+            document.getElementById('led-A1').className = 'led steady';
+            addLog("連線中斷！主板 A1 可能已斷電或失聯");
+        });
+
+        client.on('message', (topic, message) => {
+            const msg = message.toString();
+            // 解析各板狀態
+            if(topic.includes('status')) {
+                const id = topic.split('/')[1]; // 假設 topic 是 cloudforge/C1/status
+                const card = document.getElementById(`card-${id}`);
+                const led = document.getElementById(`led-${id}`);
+                if(card) {
+                    card.classList.remove('offline');
+                    led.className = 'led breathe';
+                    // 更新數值邏輯可在此擴充
+                }
+            }
+        });
+
+        function send(id, cmd) {
+            if(!isAuth) return;
+            client.publish(`cloudforge/${id}/command`, cmd);
+            addLog(`指令發送：${id} -> ${cmd}`);
+        }
+
+        function masterStop() {
+            if(confirm("🚨 警告：確定要緊急關閉所有系統嗎？")) {
+                client.publish(`cloudforge/all/command`, "STOP_ALL");
+                addLog("🚨 執行『一鍵全停』緊急指令！");
+            }
+        }
+    </script>
+</body>
+</html>
